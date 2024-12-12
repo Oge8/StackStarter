@@ -11,6 +11,7 @@
 (define-constant ERR_MILESTONE_NOT_FOUND (err u104))
 (define-constant ERR_INVALID_MILESTONE_STATE (err u105))
 (define-constant ERR_CAMPAIGN_ENDED (err u106))
+(define-constant ERR_ALREADY_WITHDRAWN (err u107))
 
 ;; Data Types
 (define-map campaigns
@@ -22,7 +23,8 @@
         funding-goal: uint,
         end-block: uint,
         total-funds: uint,
-        is-active: bool
+        is-active: bool,
+        funds-withdrawn: uint
     }
 )
 
@@ -34,7 +36,8 @@
         deadline: uint,
         is-completed: bool,
         votes-needed: uint,
-        votes-received: uint
+        votes-received: uint,
+        funds-withdrawn: bool
     }
 )
 
@@ -73,7 +76,8 @@
                 funding-goal: funding-goal,
                 end-block: end-block,
                 total-funds: u0,
-                is-active: true
+                is-active: true,
+                funds-withdrawn: u0
             }
         )
         
@@ -102,10 +106,54 @@
                 deadline: deadline,
                 is-completed: false,
                 votes-needed: votes-needed,
-                votes-received: u0
+                votes-received: u0,
+                funds-withdrawn: false
             }
         )
         (ok true)
+    )
+)
+
+;; New Function: Withdraw Milestone Funds
+(define-public (withdraw-milestone-funds (campaign-id uint) (milestone-id uint))
+    (let
+        (
+            (campaign (unwrap! (map-get? campaigns { campaign-id: campaign-id }) ERR_INVALID_CAMPAIGN))
+            (milestone (unwrap! (map-get? milestones { campaign-id: campaign-id, milestone-id: milestone-id }) ERR_MILESTONE_NOT_FOUND))
+        )
+        ;; Verify caller is campaign creator
+        (asserts! (is-eq (get creator campaign) tx-sender) ERR_NOT_AUTHORIZED)
+        ;; Verify milestone is completed
+        (asserts! (get is-completed milestone) ERR_INVALID_MILESTONE_STATE)
+        ;; Verify funds haven't been withdrawn yet
+        (asserts! (not (get funds-withdrawn milestone)) ERR_ALREADY_WITHDRAWN)
+        
+        ;; Calculate amount to withdraw
+        (let
+            (
+                (withdrawal-amount (get funds-required milestone))
+                (new-total-withdrawn (+ (get funds-withdrawn campaign) withdrawal-amount))
+            )
+            ;; Verify sufficient funds remain
+            (asserts! (<= new-total-withdrawn (get total-funds campaign)) ERR_INSUFFICIENT_FUNDS)
+            
+            ;; Transfer funds to creator
+            (try! (as-contract (stx-transfer? withdrawal-amount tx-sender (get creator campaign))))
+            
+            ;; Update milestone withdrawal status
+            (map-set milestones
+                { campaign-id: campaign-id, milestone-id: milestone-id }
+                (merge milestone { funds-withdrawn: true })
+            )
+            
+            ;; Update campaign total withdrawn
+            (map-set campaigns
+                { campaign-id: campaign-id }
+                (merge campaign { funds-withdrawn: new-total-withdrawn })
+            )
+            
+            (ok withdrawal-amount)
+        )
     )
 )
 
@@ -165,12 +213,13 @@
         ;; Check if milestone is completed
         (if (>= (+ (get votes-received milestone) u1) (get votes-needed milestone))
             (begin
-                ;; Release funds to creator
-                (try! (as-contract (stx-transfer? (get funds-required milestone) tx-sender (get creator campaign))))
                 ;; Mark milestone as completed
                 (map-set milestones
                     { campaign-id: campaign-id, milestone-id: milestone-id }
-                    (merge milestone { is-completed: true })
+                    (merge milestone { 
+                        is-completed: true,
+                        votes-received: (+ (get votes-received milestone) u1)
+                    })
                 )
                 (ok true)
             )
