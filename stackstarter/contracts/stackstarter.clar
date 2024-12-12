@@ -1,5 +1,4 @@
 ;; StackStarter: Milestone-based Crowdfunding Contract
-;; Author: Claude
 ;; Description: A decentralized crowdfunding platform with milestone validation
 
 ;; Constants
@@ -12,6 +11,7 @@
 (define-constant ERR_INVALID_MILESTONE_STATE (err u105))
 (define-constant ERR_CAMPAIGN_ENDED (err u106))
 (define-constant ERR_ALREADY_WITHDRAWN (err u107))
+(define-constant ERR_INVALID_INPUT (err u108))
 
 ;; Data Types
 (define-map campaigns
@@ -54,6 +54,23 @@
 ;; Campaign Counter
 (define-data-var campaign-id-nonce uint u0)
 
+;; Helper Functions
+(define-private (validate-string-input (input (string-ascii 256)))
+    (> (len input) u0)
+)
+
+(define-private (validate-uint-input (input uint))
+    (> input u0)
+)
+
+(define-private (validate-campaign-id (campaign-id uint))
+    (is-some (map-get? campaigns { campaign-id: campaign-id }))
+)
+
+(define-private (validate-milestone-id (campaign-id uint) (milestone-id uint))
+    (is-some (map-get? milestones { campaign-id: campaign-id, milestone-id: milestone-id }))
+)
+
 ;; Administrative Functions
 (define-public (create-campaign (title (string-ascii 64)) 
                               (description (string-ascii 256))
@@ -64,8 +81,11 @@
             (new-campaign-id (+ (var-get campaign-id-nonce) u1))
             (end-block (+ block-height duration))
         )
-        (asserts! (> funding-goal u0) ERR_INVALID_CAMPAIGN)
-        (asserts! (> duration u0) ERR_INVALID_CAMPAIGN)
+        ;; Input validation
+        (asserts! (validate-string-input title) ERR_INVALID_INPUT)
+        (asserts! (validate-string-input description) ERR_INVALID_INPUT)
+        (asserts! (validate-uint-input funding-goal) ERR_INVALID_INPUT)
+        (asserts! (validate-uint-input duration) ERR_INVALID_INPUT)
         
         (map-set campaigns
             { campaign-id: new-campaign-id }
@@ -95,6 +115,12 @@
         (
             (campaign (unwrap! (map-get? campaigns { campaign-id: campaign-id }) ERR_INVALID_CAMPAIGN))
         )
+        ;; Input validation
+        (asserts! (validate-campaign-id campaign-id) ERR_INVALID_CAMPAIGN)
+        (asserts! (validate-string-input description) ERR_INVALID_INPUT)
+        (asserts! (validate-uint-input funds-required) ERR_INVALID_INPUT)
+        (asserts! (validate-uint-input deadline) ERR_INVALID_INPUT)
+        (asserts! (validate-uint-input votes-needed) ERR_INVALID_INPUT)
         (asserts! (is-eq (get creator campaign) tx-sender) ERR_NOT_AUTHORIZED)
         (asserts! (get is-active campaign) ERR_CAMPAIGN_ENDED)
         
@@ -114,6 +140,38 @@
     )
 )
 
+;; Funding Functions
+(define-public (fund-campaign (campaign-id uint) (amount uint))
+    (let
+        (
+            (campaign (unwrap! (map-get? campaigns { campaign-id: campaign-id }) ERR_INVALID_CAMPAIGN))
+            (current-funds (default-to u0 (get amount (map-get? campaign-funders { campaign-id: campaign-id, funder: tx-sender }))))
+        )
+        ;; Input validation
+        (asserts! (validate-campaign-id campaign-id) ERR_INVALID_CAMPAIGN)
+        (asserts! (validate-uint-input amount) ERR_INVALID_INPUT)
+        (asserts! (get is-active campaign) ERR_CAMPAIGN_ENDED)
+        (asserts! (<= block-height (get end-block campaign)) ERR_CAMPAIGN_ENDED)
+        
+        ;; Transfer STX from sender to contract
+        (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+        
+        ;; Update campaign funds
+        (map-set campaigns
+            { campaign-id: campaign-id }
+            (merge campaign { total-funds: (+ (get total-funds campaign) amount) })
+        )
+        
+        ;; Update funder record
+        (map-set campaign-funders
+            { campaign-id: campaign-id, funder: tx-sender }
+            { amount: (+ current-funds amount) }
+        )
+        
+        (ok true)
+    )
+)
+
 ;; New Function: Withdraw Milestone Funds
 (define-public (withdraw-milestone-funds (campaign-id uint) (milestone-id uint))
     (let
@@ -121,6 +179,9 @@
             (campaign (unwrap! (map-get? campaigns { campaign-id: campaign-id }) ERR_INVALID_CAMPAIGN))
             (milestone (unwrap! (map-get? milestones { campaign-id: campaign-id, milestone-id: milestone-id }) ERR_MILESTONE_NOT_FOUND))
         )
+        ;; Input validation
+        (asserts! (validate-campaign-id campaign-id) ERR_INVALID_CAMPAIGN)
+        (asserts! (validate-milestone-id campaign-id milestone-id) ERR_MILESTONE_NOT_FOUND)
         ;; Verify caller is campaign creator
         (asserts! (is-eq (get creator campaign) tx-sender) ERR_NOT_AUTHORIZED)
         ;; Verify milestone is completed
@@ -157,35 +218,6 @@
     )
 )
 
-;; Funding Functions
-(define-public (fund-campaign (campaign-id uint) (amount uint))
-    (let
-        (
-            (campaign (unwrap! (map-get? campaigns { campaign-id: campaign-id }) ERR_INVALID_CAMPAIGN))
-            (current-funds (default-to u0 (get amount (map-get? campaign-funders { campaign-id: campaign-id, funder: tx-sender }))))
-        )
-        (asserts! (get is-active campaign) ERR_CAMPAIGN_ENDED)
-        (asserts! (<= block-height (get end-block campaign)) ERR_CAMPAIGN_ENDED)
-        
-        ;; Transfer STX from sender to contract
-        (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
-        
-        ;; Update campaign funds
-        (map-set campaigns
-            { campaign-id: campaign-id }
-            (merge campaign { total-funds: (+ (get total-funds campaign) amount) })
-        )
-        
-        ;; Update funder record
-        (map-set campaign-funders
-            { campaign-id: campaign-id, funder: tx-sender }
-            { amount: (+ current-funds amount) }
-        )
-        
-        (ok true)
-    )
-)
-
 ;; Milestone Voting and Validation
 (define-public (vote-milestone (campaign-id uint) (milestone-id uint))
     (let
@@ -194,6 +226,9 @@
             (campaign (unwrap! (map-get? campaigns { campaign-id: campaign-id }) ERR_INVALID_CAMPAIGN))
             (has-funded (> (default-to u0 (get amount (map-get? campaign-funders { campaign-id: campaign-id, funder: tx-sender }))) u0))
         )
+        ;; Input validation
+        (asserts! (validate-campaign-id campaign-id) ERR_INVALID_CAMPAIGN)
+        (asserts! (validate-milestone-id campaign-id milestone-id) ERR_MILESTONE_NOT_FOUND)
         (asserts! has-funded ERR_NOT_AUTHORIZED)
         (asserts! (not (get is-completed milestone)) ERR_INVALID_MILESTONE_STATE)
         (asserts! (not (default-to false (get has-voted (map-get? milestone-votes { campaign-id: campaign-id, milestone-id: milestone-id, voter: tx-sender })))) ERR_NOT_AUTHORIZED)
@@ -235,6 +270,8 @@
             (campaign (unwrap! (map-get? campaigns { campaign-id: campaign-id }) ERR_INVALID_CAMPAIGN))
             (funder-amount (unwrap! (get amount (map-get? campaign-funders { campaign-id: campaign-id, funder: tx-sender })) ERR_INSUFFICIENT_FUNDS))
         )
+        ;; Input validation
+        (asserts! (validate-campaign-id campaign-id) ERR_INVALID_CAMPAIGN)
         (asserts! (> block-height (get end-block campaign)) ERR_INVALID_CAMPAIGN)
         (asserts! (< (get total-funds campaign) (get funding-goal campaign)) ERR_INVALID_CAMPAIGN)
         
