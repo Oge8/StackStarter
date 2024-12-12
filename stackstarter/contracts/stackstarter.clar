@@ -1,5 +1,4 @@
 ;; StackStarter: Milestone-based Crowdfunding Contract
-;; Author: Claude
 ;; Description: A decentralized crowdfunding platform with milestone validation
 
 ;; Constants
